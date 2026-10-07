@@ -186,31 +186,71 @@ Märkte
 Hinweis: Stand = letzter verfügbarer Schlusskurs; Änderung ggü. vorherigem Handelstag."""
 
 SYSTEM_PROMPT = """Du bist Marktstratege und schreibst ein Morgenbriefing auf Deutsch für einen Profi.
-Du bekommst eine Datentabelle. Würdige und interpretiere JEDE Kategorie in 2-3 Sätzen:
-Zinsen & Geldmarkt, Staatsanleihen-Renditen, Spreads, Aktienindizes, FX, Rohstoffe.
-Ordne ein: Richtung, Größenordnung der Bewegung, Zusammenhänge zwischen den Kategorien
-(z. B. Renditen vs. Aktien, Öl vs. Inflationserwartung, Kurvensteilheit, Länderspreads).
-Regeln: Nutze ausschließlich Zahlen aus der Tabelle. Erfinde keine Nachrichten oder Ursachen;
-formuliere Ursachen als Hypothese. Für Werte mit n/a (z. B. Bund, OAT, BTP, V2X, iTraxx) nutze die Websuche, nenne den gefundenen Wert mit Quelle und Zeitstempel und kennzeichne ihn als "per Websuche"; findest du nichts, erwähne den Wert kurz als fehlend. Berechne Spreads aus gefundenen Werten.
-Schließe mit "Fazit" (3 Sätze: was ist heute marktrelevant). Kein Markdown, nur Fließtext
-mit Kategorie-Überschriften in GROSSBUCHSTABEN."""
+Du bekommst eine Datentabelle (Schlusskurse, Änderung zum Vortag). Schreibe zu JEDER Kategorie
+(Zinsen & Geldmarkt, Staatsanleihen-Renditen, Spreads, Aktienindizes, FX, Rohstoffe) zwei Teile:
+1) Einordnung: Richtung und Größenordnung der Bewegung, Zusammenhänge zu anderen Kategorien
+   (Renditen vs. Aktien, Öl vs. Inflationserwartung, Kurvensteilheit, Länderspreads).
+2) Hintergründe: Warum hat sich der Markt bewegt? Recherchiere per Websuche die aktuellen
+   Treiber (Notenbanken, Konjunkturdaten, Geopolitik, Politik/Haushalt, Unternehmensnachrichten,
+   Ölangebot usw.). Nenne konkrete Ereignisse mit Quelle (Medium/Institution) und Datum.
+   Ursachen, die du nicht belegen kannst, kennzeichnest du als "Hypothese".
+Für Werte mit n/a (z. B. Bund, OAT, BTP, V2X, iTraxx) suche den Wert per Websuche, nenne Quelle
+und Zeitstempel und kennzeichne ihn als "per Websuche". Berechne Spreads aus gefundenen Werten.
+Zahlen aus der Tabelle verwendest du unverändert. Erfinde keine Zahlen oder Ereignisse.
+Beginne direkt mit dem Briefing (kein Text vor oder zwischen den Suchen).
+Format: Kein Markdown. Pro Kategorie eine Überschrift in GROSSBUCHSTABEN in eigener Zeile,
+dann eine Leerzeile, dann ein Absatz "Einordnung" und ein Absatz "Hintergründe" (je 2-4 Sätze,
+Absätze durch Leerzeilen getrennt). Zum Schluss "FAZIT" mit 3 Sätzen: was ist heute marktrelevant,
+plus die 3 wichtigsten Termine/Risiken der nächsten 24 Stunden."""
+
+
+def _call(key, messages, tools=True):
+    body = {"model": MODEL, "max_tokens": 4000, "system": SYSTEM_PROMPT, "messages": messages}
+    if tools:
+        body["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}]
+    return requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                 "content-type": "application/json"},
+        json=body, timeout=180)
 
 
 def interpret(tbl):
     key = os.getenv("ANTHROPIC_API_KEY")
     if not key:
         return "(Keine Interpretation: ANTHROPIC_API_KEY nicht gesetzt.)"
-    r = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={"x-api-key": key, "anthropic-version": "2023-06-01",
-                 "content-type": "application/json"},
-        json={"model": MODEL, "max_tokens": 3000, "system": SYSTEM_PROMPT,
-              "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 6}],
-              "messages": [{"role": "user", "content": tbl}]},
-        timeout=90)
-    if r.status_code != 200:
-        return f"(Interpretation nicht verfügbar: API-Fehler {r.status_code}: {r.text[:200]})"
-    return "".join(b["text"] for b in r.json()["content"] if b["type"] == "text")
+    today = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%d.%m.%Y, %H:%M Uhr")
+    prompt = f"Heute ist {today} (Berlin). Datentabelle:\n{tbl}"
+    # 1. Versuch: mit Websuche (Hintergründe)
+    try:
+        messages = [{"role": "user", "content": prompt}]
+        text = ""
+        for _ in range(6):  # pause_turn: lange Suchen in Etappen fortsetzen
+            r = _call(key, messages)
+            if r.status_code != 200:
+                raise RuntimeError(f"{r.status_code}: {r.text[:300]}")
+            j = r.json()
+            text += "".join(b.get("text", "") for b in j["content"] if b["type"] == "text")
+            if j.get("stop_reason") == "pause_turn":
+                messages.append({"role": "assistant", "content": j["content"]})
+                continue
+            break
+        if text.strip():
+            return text.strip()
+        raise RuntimeError(f"leere Antwort (stop_reason={j.get('stop_reason')})")
+    except Exception as e:
+        print(f"[warn] Einordnung mit Websuche fehlgeschlagen: {e}", file=sys.stderr)
+    # 2. Versuch: ohne Websuche (Ursachen nur als Hypothese)
+    try:
+        r = _call(key, [{"role": "user", "content":
+                         prompt + "\n\nWebsuche steht nicht zur Verfügung: Formuliere alle "
+                         "Hintergründe ausdrücklich als Hypothese und weise darauf hin."}],
+                  tools=False)
+        if r.status_code != 200:
+            return f"(Interpretation nicht verfügbar: API-Fehler {r.status_code}: {r.text[:200]})"
+        return "".join(b["text"] for b in r.json()["content"] if b["type"] == "text").strip()
+    except Exception as e:
+        return f"(Interpretation nicht verfügbar: {e})"
 
 
 # ----------------------------------------------------------------- Versand
@@ -251,7 +291,12 @@ def write_site(now, data, text):
             rows.append(f"<tr><td>{h.escape(name)}</td><td class=n>{val}</td>"
                         f"<td class='n {cls}'>{d:+.2f} {unit}</td></tr>")
         cards.append(f"<section><h2>{h.escape(cat)}</h2><table>{''.join(rows)}</table></section>")
-    paras = "".join(f"<p>{h.escape(p.strip())}</p>" for p in text.split("\n\n") if p.strip())
+    def _para(p):
+        p = p.strip()
+        if "\n" not in p and p == p.upper() and len(p) < 60:
+            return f"<h3>{h.escape(p)}</h3>"
+        return f"<p>{h.escape(p)}</p>"
+    paras = "".join(_para(p) for p in text.split("\n\n") if p.strip())
     page = f"""<!doctype html><html lang=de><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>Marktbriefing {now:%d.%m.%Y}</title><style>
@@ -262,7 +307,7 @@ h1{{font-size:20px;margin:0}}.sub{{color:var(--mut);font-size:13px;margin:2px 0 
 section,.box{{background:var(--card);border-radius:12px;padding:12px 14px;margin:0 0 12px}}
 h2{{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin:0 0 6px}}
 table{{width:100%;border-collapse:collapse}}td{{padding:4px 0}}td.n{{text-align:right;font-variant-numeric:tabular-nums}}
-.up{{color:var(--up)}}.dn{{color:var(--dn)}}pre{{white-space:pre-wrap;font-size:12px;color:var(--mut)}}summary{{cursor:pointer;font-weight:600}}
+.up{{color:var(--up)}}.dn{{color:var(--dn)}}pre{{white-space:pre-wrap;font-size:12px;color:var(--mut)}}summary{{cursor:pointer;font-weight:600}}h3{{font-size:13px;margin:14px 0 2px;letter-spacing:.05em}}
 </style></head><body>
 <h1>Marktbriefing</h1><div class=sub>Stand {now:%d.%m.%Y, %H:%M} Uhr (Berlin) · Schlusskurse, Änderung ggü. Vortag</div>
 {''.join(cards)}
