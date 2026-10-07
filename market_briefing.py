@@ -68,9 +68,11 @@ FETCH = {"fred": fred, "ecb": ecb, "stooq": stooq, "yahoo": yahoo}
 # kind: "rate" -> Änderung in bp | "px" -> Änderung in %
 ITEMS = [
     ("Zinsen & Geldmarkt", "€STR", "ecb", "EST/B.EU000A2X2A25.WT", "rate"),
-    ("Zinsen & Geldmarkt", "Euribor 3M", "ecb", "FM/D.U2.EUR.RT.MM.EURIBOR3MD_.HSTA", "rate"),
+    ("Zinsen & Geldmarkt", "Euribor 3M (Monat)", "ecb", "FM/M.U2.EUR.RT.MM.EURIBOR3MD_.HSTA", "rate"),
     ("Zinsen & Geldmarkt", "SOFR", "fred", "SOFR", "rate"),
     ("Zinsen & Geldmarkt", "Fed Funds (eff.)", "fred", "DFF", "rate"),
+    ("Staatsanleihen-Renditen", "Euro-AAA 2J", "ecb", "YC/B.U2.EUR.4F.G_N_A.SV_C_YM.SR_2Y", "rate"),
+    ("Staatsanleihen-Renditen", "Euro-AAA 10J", "ecb", "YC/B.U2.EUR.4F.G_N_A.SV_C_YM.SR_10Y", "rate"),
     ("Staatsanleihen-Renditen", "Bund 2J", "stooq", "2dey.b", "rate"),
     ("Staatsanleihen-Renditen", "Bund 10J", "stooq", "10dey.b", "rate"),
     ("Staatsanleihen-Renditen", "OAT 10J", "stooq", "10fry.b", "rate"),
@@ -101,6 +103,7 @@ SPREADS = [
     ("UST 2s10s", "UST 10J", "UST 2J"),
     ("UST 10s30s", "UST 30J", "UST 10J"),
     ("Bund 2s10s", "Bund 10J", "Bund 2J"),
+    ("Euro-AAA 2s10s", "Euro-AAA 10J", "Euro-AAA 2J"),
 ]
 
 
@@ -188,7 +191,7 @@ Zinsen & Geldmarkt, Staatsanleihen-Renditen, Spreads, Aktienindizes, FX, Rohstof
 Ordne ein: Richtung, Größenordnung der Bewegung, Zusammenhänge zwischen den Kategorien
 (z. B. Renditen vs. Aktien, Öl vs. Inflationserwartung, Kurvensteilheit, Länderspreads).
 Regeln: Nutze ausschließlich Zahlen aus der Tabelle. Erfinde keine Nachrichten oder Ursachen;
-formuliere Ursachen als Hypothese. Werte mit n/a erwähnst du kurz als fehlend.
+formuliere Ursachen als Hypothese. Für Werte mit n/a (z. B. Bund, OAT, BTP, V2X, iTraxx) nutze die Websuche, nenne den gefundenen Wert mit Quelle und Zeitstempel und kennzeichne ihn als "per Websuche"; findest du nichts, erwähne den Wert kurz als fehlend. Berechne Spreads aus gefundenen Werten.
 Schließe mit "Fazit" (3 Sätze: was ist heute marktrelevant). Kein Markdown, nur Fließtext
 mit Kategorie-Überschriften in GROSSBUCHSTABEN."""
 
@@ -201,10 +204,12 @@ def interpret(tbl):
         "https://api.anthropic.com/v1/messages",
         headers={"x-api-key": key, "anthropic-version": "2023-06-01",
                  "content-type": "application/json"},
-        json={"model": MODEL, "max_tokens": 1500, "system": SYSTEM_PROMPT,
+        json={"model": MODEL, "max_tokens": 3000, "system": SYSTEM_PROMPT,
+              "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 6}],
               "messages": [{"role": "user", "content": tbl}]},
         timeout=90)
-    r.raise_for_status()
+    if r.status_code != 200:
+        return f"(Interpretation nicht verfügbar: API-Fehler {r.status_code}: {r.text[:200]})"
     return "".join(b["text"] for b in r.json()["content"] if b["type"] == "text")
 
 
