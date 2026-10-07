@@ -1,0 +1,32 @@
+name: Marktbriefing
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1-5"
+    - cron: "0 7 * * 1-5"
+
+permissions:
+  contents: write
+
+jobs:
+  briefing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests yfinance
+      - run: python market_briefing.py
+        env:
+          CI: "true"
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Ergebnis speichern
+        run: |
+          git config user.name "briefing-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add docs
+          git diff --cached --quiet || (git commit -m "Briefing" && git push)
